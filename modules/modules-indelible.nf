@@ -1,10 +1,10 @@
 #!/usr/bin/env nextflow
 
 // REQUIRED FILES
-ref           = file(params.ref, type: 'file')
-priors        = file(params.priors, type: 'file')
-config        = file(params.config, type: 'file')
-outdir        = file(params.outdir, type: 'dir')
+ref               = file(params.ref, type: 'file')
+priors            = file(params.priors, type: 'file')
+indelible_config  = file(params.config, type: 'file')
+outdir            = file(params.outdir, type: 'dir')
 
 // 1. THE FETCH COMMAND EXTRACTS THE READS FROM THE BAM FILE, IT TAKES 2 ARGUMENTS:
 process run_Fetch {
@@ -12,10 +12,10 @@ process run_Fetch {
     errorStrategy 'ignore'
     
     input:
-        tuple val(sample), path(cram), path(crai)
+    tuple val(sample), path(cram), path(crai)
     
     output:
-        tuple val(sample), path("${cram}.sc_reads"), path(cram), path(crai), emit: sc_reads
+    tuple val(sample), path("${cram}.sc_reads"), path(cram), path(crai), emit: sc_reads
     
     """
     /bin/hostname
@@ -58,7 +58,7 @@ process run_Score {
 process run_Database {
     tag { "Indel_DB" }
     cpus 6
-    publishDir "${outdir}/database", mode: 'copy', overwrite: true
+    publishDir "${outdir}/out_INDELIBLE/database", mode: 'copy', overwrite: true
 
     input:
     path(score)
@@ -75,7 +75,7 @@ process run_Database {
 // 5. THE ANNOTATE COMMAND ENRICHES THE RESULT WITH GENE/EXON ANNOTATIONS AND MERGES THE DATABASE RESULTS WITH THE POSITION FILE:
 process run_Annotate {
     tag { "${score}" }
-    publishDir "${outdir}/annotations", mode: 'copy', overwrite: true
+    publishDir "${outdir}/out_INDELIBLE/annotations", mode: 'copy', overwrite: true
 
     input:
     path(database)
@@ -93,7 +93,7 @@ process run_Annotate {
 // TRIO
 process run_DenovoTrio {
     tag { sample }
-    publishDir "${outdir}/denovo_annotation_trio", mode: 'copy', overwrite: true
+    publishDir "${outdir}/out_INDELIBLE/denovo_annotation_trio", mode: 'copy', overwrite: true
 
     input:
     tuple val(sample), path(child_cram), path(child_crai), path(mom_cram), path(mom_crai), path(dad_cram), path(dad_crai), path(annotation)
@@ -109,7 +109,7 @@ process run_DenovoTrio {
 // MOM
 process run_DenovoMom {
     tag { sample }
-    publishDir "${outdir}/denovo_annotation_mom", mode: 'copy', overwrite: true
+    publishDir "${outdir}/out_INDELIBLE/denovo_annotation_mom", mode: 'copy', overwrite: true
 
     input:
     tuple val(sample), path(child_cram), path(child_crai), path(mom_cram), path(mom_crai), path(annotation)
@@ -125,7 +125,7 @@ process run_DenovoMom {
 // DAD
 process run_DenovoDad {
     tag { sample }
-    publishDir "${outdir}/denovo_annotation_dad", mode: 'copy', overwrite: true
+    publishDir "${outdir}/out_INDELIBLE/denovo_annotation_dad", mode: 'copy', overwrite: true
 
     input:
     tuple val(sample), path(child_cram), path(child_crai), path(dad_cram), path(dad_crai), path(annotation)
