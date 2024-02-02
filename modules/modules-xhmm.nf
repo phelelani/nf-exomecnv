@@ -1,4 +1,5 @@
 #!/usr/bin/env nextflow
+nextflow.enable.dsl=2
 
 ref       = file(params.ref, type: 'file')
 probes    = file(params.probes, type: 'file')
@@ -7,24 +8,27 @@ outdir    = file(params.outdir, type: 'dir')
 
 // SPLIT BAM FILES TO GROUPS
 process groupBAMs {
+    tag { 'group_bams' }
+
     input:
-    path(bams) //.collectFile () { item -> [ 'bamlist_unsorted.txt', "${item.get(1)[0]}" + '\n' ] }
+    path(bams)
 
     output:
     path("bam_group_*"), emit: bam_groups
     
     """
-    sort bamlist_unsorted.txt > bamlist.txt
-    split -l 5 bamlist.txt --numeric-suffixes --additional-suffix=.list bam_group_
+    sort bam_list_unsorted.txt > bam_list_sorted.txt
+    split -l 5 bam_list_sorted.txt --numeric-suffixes --additional-suffix=.list bam_group_
     """
 }
 
 // RUN GATK FOR DEPTH OF COVERAGE (FOR SAMPLES IN EACH GROUP):
-process calcDOC {
+process gatkDOC {
+    tag { 'calc_doc' }
     maxForks 10
     memory '11 GB'
     module 'gatk/4.2.5.0'
-    publishDir "${out_dir}/out_XHMM", mode: 'copy', overwrite: true
+    publishDir "${outdir}/out_XHMM", mode: 'copy', overwrite: true
     
     input:
     tuple val(group), path(list)
@@ -54,7 +58,9 @@ process calcDOC {
 
 // COMBINES GATK DEPTH-OF-COVERAGE OUTPUTS FOR MULTIPLE SAMPLES (AT SAME LOCI):
 process combineDOC {
-    publishDir "${out_dir}/out_XHMM", mode: 'copy', overwrite: true
+    tag { 'combine_doc' }
+    label 'xhmm'
+    publishDir "${outdir}/out_XHMM", mode: 'copy', overwrite: true
     
     input:
     path(list)
@@ -70,7 +76,8 @@ process combineDOC {
 }
 
 // OPTIONALLY, RUN GATK TO CALCULATE THE PER-TARGET GC CONTENT AND CREATE A LIST OF THE TARGETS WITH EXTREME GC CONTENT:
-process calcGC {
+process calcGC_XHMM {
+    tag { 'calc_dc' }
     publishDir "${outdir}/out_XHMM", mode: 'copy', overwrite: true
     
     output:
@@ -87,8 +94,34 @@ process calcGC {
     """
 }
 
+// process calc_PLINKSeq {
+//     tag {}
+//     publishDir "${outdir}/out_XHMM", mode: 'copy', overwrite: true
+
+//     output:
+
+//     input:
+
+//     """
+//     awk 'BEGIN{OFS="\t"; print "#CHR\tBP1\tBP2\tID"} {chr=$1; if (match(chr,"chr")==0) {chr="chr"chr} bp1=$2; bp2=bp1; if (length($2-$3) > 1) {bp2=$3}print chr,bp1,bp2,NR}' ${probes} > EXOME.targets.reg
+
+
+
+//     ./sources/scripts/interval_list_to_pseq_reg EXOME.interval_list > ./EXOME.targets.reg
+//     pseq . loc-load --locdb ./EXOME.targets.LOCDB --file ./EXOME.targets.reg --group targets --out ./EXOME.targets.LOCDB.loc-load
+    
+//     pseq . loc-stats --locdb ./EXOME.targets.LOCDB --group targets --seqdb ./seqdb | \
+//     awk '{if (NR > 1) print $_}' | sort -k1 -g | awk '{print $10}' | paste ./EXOME.interval_list - | \
+//     awk '{print $1"\t"$2}' > ./DATA.locus_complexity.txt
+
+//     cat ./DATA.locus_complexity.txt | awk '{if ($2 > 0.25) print $1}' > ./low_complexity_targets.txt
+//     """
+// }
+
 // FILTERS SAMPLES AND TARGETS AND THEN MEAN-CENTERS THE TARGETS:
 process filterSamples {
+    tag { 'filter_samples' }
+    label 'xhmm'
     publishDir "${outdir}/out_XHMM", mode: 'copy', overwrite: true    
 
     input:
@@ -115,6 +148,8 @@ process filterSamples {
 
 // RUNS PCA ON MEAN-CENTERED DATA:
 process runPCA {
+    tag { 'run_pca' }
+    label 'xhmm'
     publishDir "${outdir}/out_XHMM", mode: 'copy', overwrite: true
 
     input:
@@ -130,6 +165,8 @@ process runPCA {
 
 // NORMALIZES MEAN-CENTERED DATA USING PCA INFORMATION:
 process normalisePCA {
+    tag { 'norm_pca' }
+    label 'xhmm'
     publishDir "${outdir}/out_XHMM", mode: 'copy', overwrite: true
 
     input:
@@ -149,6 +186,8 @@ process normalisePCA {
 
 // FILTERS AND Z-SCORE CENTERS (BY SAMPLE) THE PCA-NORMALIZED DATA:
 process filterZScore {
+    tag { 'filter_zscore' }
+    label 'xhmm'
     publishDir "${outdir}/out_XHMM", mode: 'copy', overwrite: true
     
     input:
@@ -171,6 +210,8 @@ process filterZScore {
 
 // FILTERS ORIGINAL READ-DEPTH DATA TO BE THE SAME AS FILTERED, NORMALIZED DATA:
 process filterRD {
+    tag { 'filter_rd' }
+    label 'xhmm'
     publishDir "${outdir}/out_XHMM", mode: 'copy', overwrite: true
 
     input:
@@ -195,6 +236,8 @@ process filterRD {
 
 // DISCOVERS CNVS IN NORMALIZED DATA:
 process discoverCNVs {
+    tag { 'discover_cnvs' }
+    label 'xhmm'
     publishDir "${outdir}/out_XHMM", mode: 'copy', overwrite: true
 
     input:
@@ -205,7 +248,7 @@ process discoverCNVs {
     path("*"), emit: cnvs
     
     """
-    xhmm --discover -p /external/diskC/ddd/nf-xhmm/params.txt \
+    xhmm --discover -p ${xhmm_conf} \
         -r DATA.PCA_normalized.filtered.sample_zscores.RD.txt \
         -R DATA.same_filtered.RD.txt \
         -c DATA.xcnv -a DATA.aux_xcnv -s DATA
@@ -214,6 +257,8 @@ process discoverCNVs {
 
 // GENOTYPES DISCOVERED CNVS IN ALL SAMPLES:
 process genotypeCNVs {
+    tag { 'genotype_cnvs' }
+    label 'xhmm'
     publishDir "${outdir}/out_XHMM", mode: 'copy', overwrite: true
     
     input:
@@ -225,10 +270,26 @@ process genotypeCNVs {
     path("*"), emit: genotypes
     
     """
-    xhmm --genotype -p /external/diskC/ddd/nf-xhmm/params.txt \
+    xhmm --genotype -p ${xhmm_conf} \
         -r DATA.PCA_normalized.filtered.sample_zscores.RD.txt \
         -R DATA.same_filtered.RD.txt \
         -g DATA.xcnv -F ${ref} \
         -v DATA.vcf
+    """
+}
+
+process filterXHMMCNVs {
+    tag { 'filter_cnvs' }
+    label 'xhmm'
+    publishDir "${outdir}/out_XHMM", mode: 'copy', overwrite: true
+    
+    input:
+    path(cnvs)
+    
+    output:
+    path("DATA_filtered.xcnv"), emit: filtered_cnvs
+    
+    """
+    awk '{ if( (\$9>=60) && (\$10>=60) && (\$11>=60) ) { print } }' DATA.xcnv > DATA_filtered.xcnv
     """
 }
