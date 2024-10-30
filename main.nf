@@ -1,14 +1,6 @@
 #!/usr/bin/env nextflow
 nextflow.enable.dsl=2
 
-// INPUT FILES FOR CANOES & XHMM
-Channel.fromFilePairs([params.bams + '/*{.bam,.bam.bai}'])
-    .map { it -> [ it[0], it[1].find { it =~ '.bam$' }, it[1].find { it =~ '.bai$' }] }
-    .set { bams }
-
-// bams.collectFile () { item -> [ 'bam_list_unsorted.txt', "${item.get(1)[0]}" + '\n' ] }
-//     .set { bam_list }
-
 // INPUT FILES FOR INDELIBLE
 Channel.fromFilePairs([params.crams + '/*{.cram,.cram.crai}'])
     .map { it -> [ it[0][0..-6], it[1][0], it[1][1] ] }
@@ -32,16 +24,17 @@ Channel.fromFilePairs([params.crams + '/*{_01_1,_02_2,_03_3}*'], size: -1)
     .set { cram_dad }
 
 // OUTPUT DIR
-outdir = file(params.outdir, type: 'dir')
+outdir    = file(params.outdir, type: 'dir')
+workflow  = params.workflow
 outdir.mkdir()
-workflow                  = params.workflow
 
 include { run_Fetch; run_Aggregate; run_Score; run_Database;
          run_Annotate; run_DenovoTrio; run_DenovoMom; run_DenovoDad; filterINDELIBLE } from './modules/modules-indelible.nf'
 include { genReadCounts; calcGC_CANOES; runCANOES; filterCANOESCNVs } from './modules/modules-canoes.nf'
 include { groupBAMs; gatkDOC; combineDOC; calcGC_XHMM; filterSamples; runPCA;
          normalisePCA; filterZScore; filterRD; discoverCNVs; genotypeCNVs; filterXHMMCNVs } from './modules/modules-xhmm.nf'
-include { generateWindows; samtoolsDOC; normalizeDOC; trainModels; callCNVs; filterCLAMMSCNVs } from './modules/modules-clamms.nf'
+include { generateWindows; samtoolsDOC; normalizeDOC; createPCAData; getPicardQCMetrics; getPicardMeanInsertSize; combinePicardQCMetrics;
+         createCustomRefPanel; trainModels; callCNVs; filterCLAMMSCNVs } from './modules/modules-clamms.nf'
 
 // INDELIBLE WORKFLOW
 workflow RUN_INDELIBLE {
@@ -64,12 +57,24 @@ workflow RUN_INDELIBLE {
 workflow RUN_CANOES {
     take:
     bams
-    
+    chroms
+
     main:
-    genReadCounts(bams.collectFile () { item -> [ 'bam_list_unsorted.txt', "${item[1]}" + '\n' ] })
-    calcGC_CANOES()
-    runCANOES(genReadCounts.out.canoes_reads, calcGC_CANOES.out.gc_content)
-    filterCANOESCNVs(runCANOES.out.cnvs)
+    calcGC_CANOES(chroms)
+    bams
+        .collectFile() { item -> [ 'bam_list_unsorted.txt', "${item[1]}" + '\n' ] }
+        .set { bam_list }
+    genReadCounts(bam_list,chroms)
+    genReadCounts.out.chr_reads_cov
+        .join(calcGC_CANOES.out.chr_gc_content)
+        .set { chr_canoes_input }
+    runCANOES(chr_canoes_input)
+    runCANOES.out.chr_cnvs_pass
+        .map { it -> it[1] }
+        .collect()
+        .set { all_cnvs_pass }
+    filterCANOESCNVs(all_cnvs_pass)
+    filterCANOESCNVs.out.filtered_cnvs.view()
 }
 
 // XHMM WORKFLOW
@@ -103,8 +108,30 @@ workflow RUN_CLAMMS {
     generateWindows()
     samtoolsDOC(bams, generateWindows.out.windows)
     normalizeDOC(samtoolsDOC.out.coverage, generateWindows.out.windows)
-    trainModels(normalizeDOC.out.coverage_norm.collect(), generateWindows.out.windows)
-    callCNVs(normalizeDOC.out.coverage_norm_set, trainModels.out.models)
+    normalizeDOC.out.norm_coverage
+        .map { it -> it[1] }
+        .collect()
+        .set { norm_coverage_files }
+    createPCAData(norm_coverage_files)
+    getPicardQCMetrics(bams)
+    getPicardMeanInsertSize(bams)
+    getPicardQCMetrics.out.qc_metrics
+        .join(getPicardMeanInsertSize.out.ins_size_metrics, by:0)
+        .map { it -> [ it[1], it[2] ] }
+        .flatten()
+        .collect()
+        .set { picard_metrics }
+    combinePicardQCMetrics(picard_metrics)
+    createCustomRefPanel(norm_coverage_files,createPCAData.out.pca_data,combinePicardQCMetrics.out.qcs_metrics)
+    createCustomRefPanel.out.ref_panel
+        .flatten()
+        .map { it -> [ "${it.baseName.replaceAll('.ref.panel.files','')}", it ] }
+        .set { for_training }
+    trainModels(for_training, generateWindows.out.windows, norm_coverage_files)
+    trainModels.out.sample_models
+        .join(normalizeDOC.out.norm_coverage)
+        .set { cllin }
+    callCNVs(cllin)
     filterCLAMMSCNVs(callCNVs.out.cnvs.map { it -> it[1] }.collect())
 }
 
@@ -116,20 +143,38 @@ workflow {
             break
             // =====
         case['canoes']:
-            RUN_CANOES(bams)
+            chroms = (1..22).toList().collect { 'chr' + "${it}" } //+ ["chrX", "chrY","chrM"]
+            Channel.fromPath(params.samplesheet_bams)
+                .splitCsv(header: true, sep: '\t')
+                .map { row -> [ "${row.SampleID}", "${row.BAM}", "${row.BAM}".replaceAll("\\b.bam\\b",".bam.bai") ] }
+                .set { bams }
+            RUN_CANOES(bams,chroms)
             break
             // =====
         case['xhmm']:
+            Channel.fromPath(params.samplesheet_bams)
+                .splitCsv(header: true, sep: '\t')
+                .map { row -> [ "${row.SampleID}", "${row.BAM}", "${row.BAM}".replaceAll("\\b.bam\\b",".bam.bai") ] }
+                .set { bams }
             RUN_XHMM(bams)
             break
             // =====
         case['clamms']:
+            Channel.fromPath(params.samplesheet_bams)
+                .splitCsv(header: true, sep: '\t')
+                .map { row -> [ "${row.SampleID}", "${row.BAM}", "${row.BAM}".replaceAll("\\b.bam\\b",".bam.bai") ] }
+                .set { bams }
             RUN_CLAMMS(bams)
             break
             // =====
         case['all']:
-            // RUN_INDELIBLE(crams)
-            RUN_CANOES(bams)
+            chroms = (1..22).toList().collect { 'chr' + "${it}" } //+ ["chrX", "chrY","chrM"]
+            Channel.fromPath(params.samplesheet_bams)
+                .splitCsv(header: true, sep: '\t')
+                .map { row -> [ "${row.SampleID}", "${row.BAM}", "${row.BAM}".replaceAll("\\b.bam\\b",".bam.bai") ] }
+                .set { bams }
+            //RUN_INDELIBLE(crams)
+            RUN_CANOES(bams,chroms)
             RUN_XHMM(bams)
             RUN_CLAMMS(bams)
             break

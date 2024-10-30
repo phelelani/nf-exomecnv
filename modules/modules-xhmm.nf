@@ -18,16 +18,14 @@ process groupBAMs {
     
     """
     sort bam_list_unsorted.txt > bam_list_sorted.txt
-    split -l 5 bam_list_sorted.txt --numeric-suffixes --additional-suffix=.list bam_group_
+    split -l 5 bam_list_sorted.txt --numeric-suffixes=000 --suffix-length=3 --additional-suffix=.list bam_group_
     """
 }
 
 // RUN GATK FOR DEPTH OF COVERAGE (FOR SAMPLES IN EACH GROUP):
 process gatkDOC {
-    tag { 'calc_doc' }
-    maxForks 10
-    memory '11 GB'
-    module 'gatk/4.2.5.0'
+    tag { "${group}" }
+    label 'gatk'
     publishDir "${outdir}/out_XHMM", mode: 'copy', overwrite: true
     
     input:
@@ -36,8 +34,11 @@ process gatkDOC {
     output:
     tuple val(group), path("${group}.DATA.sample_interval_summary"), emit: bam_group_doc
 
+    script:
+    mem = task.memory.toGiga() - 4
+    
     """
-    gatk --java-options "-Xmx10G" \
+    gatk --java-options "-XX:+UseSerialGC -Xss456k -Xms2g -Xmx${mem}g -Djava.io.tmpdir=\$PWD" \
         DepthOfCoverage \
         -I ${list} \
         -L ${probes} \
@@ -78,21 +79,30 @@ process combineDOC {
 // OPTIONALLY, RUN GATK TO CALCULATE THE PER-TARGET GC CONTENT AND CREATE A LIST OF THE TARGETS WITH EXTREME GC CONTENT:
 process calcGC_XHMM {
     tag { 'calc_dc' }
+    label 'gatk'
     publishDir "${outdir}/out_XHMM", mode: 'copy', overwrite: true
     
     output:
+    path("DATA.locus_GC.txt"), emit: gc_targets
     path("extreme_gc_targets.txt"), emit: extreme_gc_targets
     
     """
-    java -Xmx3072m -Djava.io.tmpdir=TEMP -jar /home/phelelani/applications/gatk-2.1-9/GenomeAnalysisTK.jar \
-        -T GCContentByInterval \
-        -L ${probes} \
+    gatk AnnotateIntervals \
         -R ${ref} \
-        -o DATA.locus_GC.txt
+        -L ${probes} \
+        --interval-merging-rule OVERLAPPING_ONLY \
+        -O gc.tmp
 
+    grep "^chr" gc.tmp | awk '{ print \$1":"\$2"-"\$3"\t"\$4 }' > DATA.locus_GC.txt
     cat DATA.locus_GC.txt | awk '{ if (\$2 < 0.1 || \$2 > 0.9) print \$1 }' > extreme_gc_targets.txt
     """
 }
+
+// java -Xmx3072m -Djava.io.tmpdir=TEMP -jar /home/phelelani/applications/gatk-2.1-9/GenomeAnalysisTK.jar \
+//     -T GCContentByInterval \
+//     -L ${probes} \
+//     -R ${ref} \
+//     -o DATA.locus_GC.txt
 
 // process calc_PLINKSeq {
 //     tag {}
